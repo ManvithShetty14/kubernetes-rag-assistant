@@ -218,3 +218,16 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# keep the template
+!.env.example
+.env.backup-*
+
+# --- Project-specific: secrets & local tool state (never push) ---
+.env.*
+!.env.example
+.logfire/
+.deepeval/
+.idea/
+.streamlit/secrets.toml
+.flashrank/
