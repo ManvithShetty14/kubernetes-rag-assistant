@@ -1,0 +1,16 @@
+services:
+  litellm:
+    # Official image, pinned. (The official Docker image was NOT affected by the
+    # March 2026 PyPI compromise of litellm 1.82.7 / 1.82.8.)
+    image: ghcr.io/berriai/litellm:v1.108.0
+    container_name: litellm-gateway
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./litellm_config.yaml:/app/config.yaml:ro
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    environment:
+      GROQ_API_KEY: ${GROQ_API_KEY}
+      GROQ_FALLBACK_API_KEY: ${GROQ_FALLBACK_API_KEY:-${GROQ_API_KEY}}
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-local-dev-key}
+    restart: unless-stopped

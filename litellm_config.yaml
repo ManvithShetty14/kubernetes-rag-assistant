@@ -1,0 +1,56 @@
+# ==============================================================================
+# LiteLLM Proxy (AI Gateway) — replaces Portkey. Free & open source, runs locally.
+# Start:  docker compose up -d litellm      (listens on http://localhost:4000)
+# The app only ever sees the aliases below (model_name), never provider details.
+# ==============================================================================
+
+# NOTE: Groq shut down llama-3.3-70b-versatile and llama-3.1-8b-instant for free/developer
+# accounts on 2026-08-16. Groq's recommended replacements are used below.
+# To switch models later, change ONLY the `model:` lines here — no app code changes needed.
+# Current Groq models: https://console.groq.com/docs/models
+
+model_list:
+  # Primary RAG model (planner + responder)  — replaces llama-3.3-70b-versatile
+  - model_name: rag-primary
+    litellm_params:
+      model: groq/openai/gpt-oss-120b
+      api_key: os.environ/GROQ_API_KEY
+
+  # Fallback when the primary fails / is rate-limited (uses your 2nd Groq key)
+  - model_name: rag-fallback
+    litellm_params:
+      model: groq/openai/gpt-oss-20b
+      api_key: os.environ/GROQ_FALLBACK_API_KEY
+      reasoning_effort: low
+
+  # Small, fast model for NeMo Guardrails intent classification — replaces llama-3.1-8b-instant
+  - model_name: guard-model
+    litellm_params:
+      model: groq/openai/gpt-oss-20b
+      api_key: os.environ/GROQ_API_KEY
+      reasoning_effort: low       # gpt-oss is a reasoning model; keep the gate fast
+
+litellm_settings:
+  drop_params: true          # silently drop params Groq doesn't support instead of erroring
+  request_timeout: 60
+  # Exact-match response cache (in-memory). Identical prompts return instantly
+  # and the response carries an `x-litellm-cache-key` header -> "Cache: Hit ⚡" in the UI.
+  # For multiple replicas switch to `type: redis` (see LiteLLM docs).
+  cache: true
+  cache_params:
+    type: local
+    ttl: 3600
+    supported_call_types: ["acompletion", "completion"]
+
+router_settings:
+  num_retries: 2             # retry the same model on 429 / 5xx before falling back
+  retry_after: 2
+  allowed_fails: 3           # after 3 failures in a minute the deployment cools down
+  cooldown_time: 30
+  fallbacks:
+    - rag-primary: ["rag-fallback"]
+    - guard-model: ["rag-fallback"]
+
+general_settings:
+  # Clients must send `Authorization: Bearer <LITELLM_MASTER_KEY>` (must start with "sk-")
+  master_key: os.environ/LITELLM_MASTER_KEY
