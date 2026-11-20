@@ -1,0 +1,119 @@
+# ==============================================================================
+# CI/CD: build 3 images -> Artifact Registry -> deploy 3 Cloud Run services.
+# Runs on every push to main (Cloud Build GitHub trigger) or manually:
+#   gcloud builds submit --config cloudbuild.yaml \
+#     --service-account="projects/$PROJECT_ID/serviceAccounts/rag-deployer@$PROJECT_ID.iam.gserviceaccount.com"
+# One-time project setup: see docs/DEPLOYMENT.md
+#
+# Architecture on Cloud Run:
+#   rag-ui      (public)  --ID token-->  rag-api (PRIVATE, IAM-only)  --master key-->  rag-gateway  --> Groq
+#                                          └──> Neon Postgres (chat history), Qdrant, Gemini
+# ==============================================================================
+
+substitutions:
+  _REGION: us-central1
+  _REPO: rag-app
+  _GATEWAY: rag-gateway
+  _API: rag-api
+  _UI: rag-ui
+
+options:
+  logging: CLOUD_LOGGING_ONLY          # required when the build runs as a user-managed service account
+  substitution_option: ALLOW_LOOSE
+
+timeout: 1800s
+
+steps:
+  # ---------- Build (in parallel) ----------
+  - id: build-gateway
+    name: gcr.io/cloud-builders/docker
+    waitFor: ["-"]
+    args: ["build", "-f", "docker/gateway.Dockerfile",
+           "-t", "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/gateway:$BUILD_ID", "."]
+
+  - id: build-api
+    name: gcr.io/cloud-builders/docker
+    waitFor: ["-"]
+    args: ["build", "-f", "docker/api.Dockerfile",
+           "-t", "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/api:$BUILD_ID", "."]
+
+  - id: build-ui
+    name: gcr.io/cloud-builders/docker
+    waitFor: ["-"]
+    args: ["build", "-f", "docker/ui.Dockerfile",
+           "-t", "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/ui:$BUILD_ID", "."]
+
+  # ---------- Push ----------
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    waitFor: ["build-gateway", "build-api", "build-ui"]
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        for img in gateway api ui; do
+          docker push "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/$${img}:$BUILD_ID"
+        done
+
+  # ---------- Deploy: gateway -> API -> UI ----------
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    waitFor: ["push"]
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        IMG="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}"
+        SA_SUFFIX="$PROJECT_ID.iam.gserviceaccount.com"
+
+        echo "=== 1/3 LiteLLM gateway (public URL, protected by the LiteLLM master key)"
+        gcloud run deploy "${_GATEWAY}" \
+          --image="$${IMG}/gateway:$BUILD_ID" \
+          --region="${_REGION}" \
+          --port=4000 --memory=1Gi --cpu=1 \
+          --min-instances=0 --max-instances=1 \
+          --allow-unauthenticated \
+          --service-account="rag-gateway-sa@$${SA_SUFFIX}" \
+          --set-secrets="GROQ_API_KEY=groq-api-key:latest,GROQ_FALLBACK_API_KEY=groq-fallback-api-key:latest,LITELLM_MASTER_KEY=litellm-master-key:latest" \
+          --quiet
+        GATEWAY_URL="$(gcloud run services describe "${_GATEWAY}" --region="${_REGION}" --format='value(status.url)')"
+
+        echo "=== 2/3 API (PRIVATE: only identities with run.invoker can call it)"
+        gcloud run deploy "${_API}" \
+          --image="$${IMG}/api:$BUILD_ID" \
+          --region="${_REGION}" \
+          --port=8080 --memory=2Gi --cpu=1 --cpu-boost \
+          --concurrency=10 --timeout=300 \
+          --min-instances=0 --max-instances=1 \
+          --no-allow-unauthenticated \
+          --service-account="rag-api-sa@$${SA_SUFFIX}" \
+          --set-env-vars="LITELLM_BASE_URL=$${GATEWAY_URL},ENVIRONMENT=production" \
+          --set-secrets="GEMINI_API_KEY=gemini-api-key:latest,QDRANT_API_KEY=qdrant-api-key:latest,QDRANT_CLUSTER_ENDPOINT=qdrant-url:latest,LITELLM_MASTER_KEY=litellm-master-key:latest,DATABASE_URL=database-url:latest" \
+          --quiet
+        API_URL="$(gcloud run services describe "${_API}" --region="${_REGION}" --format='value(status.url)')"
+
+        # Allow ONLY the UI's service account to call the private API (idempotent)
+        gcloud run services add-iam-policy-binding "${_API}" \
+          --region="${_REGION}" \
+          --member="serviceAccount:rag-ui-sa@$${SA_SUFFIX}" \
+          --role="roles/run.invoker" --quiet > /dev/null
+
+        echo "=== 3/3 Streamlit UI (public)"
+        gcloud run deploy "${_UI}" \
+          --image="$${IMG}/ui:$BUILD_ID" \
+          --region="${_REGION}" \
+          --port=8080 --memory=512Mi --cpu=1 \
+          --min-instances=0 --max-instances=1 \
+          --session-affinity --timeout=300 \
+          --allow-unauthenticated \
+          --service-account="rag-ui-sa@$${SA_SUFFIX}" \
+          --set-env-vars="BACKEND_URL=$${API_URL},BACKEND_AUTH=google" \
+          --quiet
+
+        echo ""
+        echo "Deployed:"
+        echo "  UI      : $(gcloud run services describe "${_UI}" --region="${_REGION}" --format='value(status.url)')"
+        echo "  API     : $${API_URL}   (private)"
+        echo "  Gateway : $${GATEWAY_URL}"

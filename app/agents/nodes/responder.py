@@ -1,5 +1,7 @@
 import logfire
 from app.agents.state import AgentState
+from app.config import settings
+from app.agents.scope import CONVERSATIONAL, NOT_FOUND_MESSAGE, skipped_note
 from app.gateway import chat_completion
 
 
@@ -12,17 +14,26 @@ def generate_node(state: AgentState):
     query = state["current_query"]
 
     history_str = ""
-    for msg in state["messages"][:-1]:
+    for msg in state["messages"][:-1][-settings.MAX_HISTORY_MESSAGES:]:
         role = "User" if msg["role"] == "user" else "Assistant"
         history_str += f"{role}: {msg['content']}\n"
 
     user_msg = state["messages"][-1]["content"] if state["messages"] else ""
 
-    if query == "CONVERSATIONAL":
+    # Mixed question (e.g. "create a CronJob, and give me a biryani recipe"): answer ONLY the
+    # Kubernetes part the planner extracted, then append a fixed note about what was skipped.
+    skipped = state.get("skipped_part") or ""
+    question = query if (skipped and query != CONVERSATIONAL) else user_msg
+    note = skipped_note(skipped) if skipped else ""
+
+    if query == CONVERSATIONAL:
         logfire.info("Generating conversational response using memory.")
         prompt = f"""
-        You are a friendly and helpful Enterprise AI Assistant.
-        Answer the user's latest message using the CONVERSATION HISTORY below.
+        You are a friendly Kubernetes documentation assistant.
+        Reply to the user's latest message using the CONVERSATION HISTORY below.
+        Keep it to greetings, thanks, and questions about this conversation.
+        If the user asks for anything that is not about Kubernetes (recipes, jokes, poems,
+        general knowledge, etc.), politely say you can only help with Kubernetes questions.
 
         CONVERSATION HISTORY:
         {history_str}
@@ -31,6 +42,18 @@ def generate_node(state: AgentState):
         "{user_msg}"
         """
     else:
+        # Nothing relevant was retrieved -> fixed reply, no LLM call (prevents answers from
+        # the model's general knowledge that are not backed by our documentation)
+        if not state["documents"]:
+            logfire.info("No relevant context — returning 'not found' without calling the LLM.")
+            answer = NOT_FOUND_MESSAGE + note
+            return {
+                "final_answer": answer,
+                "status": "No relevant documentation found.",
+                "plan": state["plan"],
+                "messages": [{"role": "assistant", "content": answer}],
+            }
+
         logfire.info("Generating technical RAG response.")
         max_context_chars = 25000
         full_context = ""
@@ -43,8 +66,14 @@ def generate_node(state: AgentState):
                 break
 
         prompt = f"""
-        You are a Senior Technical Architect.
-        Answer the question using the TECHNICAL CONTEXT provided.
+        You are a Kubernetes documentation assistant.
+        Answer the user's question using ONLY the TECHNICAL CONTEXT below (excerpts from our docs).
+        Rules:
+        - Do not use outside knowledge to add facts that are not in the context.
+        - If the context does not contain the answer, say plainly that the documentation
+          you have does not cover it — do not guess.
+        - If the question is not about Kubernetes, say you can only help with Kubernetes.
+        - Be clear and concise; include commands or YAML from the context when useful.
 
         TECHNICAL CONTEXT:
         {full_context}
@@ -53,7 +82,7 @@ def generate_node(state: AgentState):
         {history_str}
 
         USER QUESTION:
-        "{user_msg}"
+        "{question}"
         """
 
     with logfire.span("✍️ LLM Synthesis"):
@@ -73,6 +102,7 @@ def generate_node(state: AgentState):
                 plan_update = state["plan"]
                 status = "Response generated."
 
+            content = (content or "").rstrip() + note
             return {
                 "final_answer": content,
                 "status": status,

@@ -48,7 +48,15 @@ def _init():
         _active_model = gemini
         _model_type = "gemini"
     else:
-        _active_model = _load_fallback()
+        try:
+            _active_model = _load_fallback()
+        except ImportError as e:
+            # Production image excludes sentence-transformers (PyTorch). Leave the model unset so
+            # the next request re-tries Gemini instead of staying broken.
+            raise RuntimeError(
+                "Gemini embeddings are unavailable and the local fallback (sentence-transformers) "
+                "is not installed. Check GEMINI_API_KEY / Gemini quota."
+            ) from e
         _model_type = "fallback"
 
 

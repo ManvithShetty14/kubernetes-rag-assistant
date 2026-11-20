@@ -1,0 +1,17 @@
+# Keep secrets, local environments and large data out of every image build context
+.git
+.github
+.venv
+.idea
+.deepeval
+.logfire
+.pytest_cache
+**/__pycache__
+**/*.pyc
+.env
+.env.*
+!.env.example
+DATA
+processed_data
+evals
+docker-compose.yml

@@ -66,6 +66,23 @@ uv run streamlit run ui/app.py          # http://localhost:8501
 uv run streamlit run evals/app.py
 ```
 
+## Chat history
+Conversations are saved in Postgres (LangGraph `PostgresSaver`) when `DATABASE_URL` is set, and
+listed in the UI sidebar ("Your chats"). Chats are tied to the page link (`?u=<owner>&chat=<chat>`),
+so bookmark it to return later. Without `DATABASE_URL`, memory is in-process (lost on restart).
+Local database: `docker compose up -d postgres` and
+`DATABASE_URL=postgresql://rag:rag@localhost:5432/rag` in `.env`.
+
+## 9. Run the whole stack in Docker (production images)
+```bash
+docker compose --profile full up --build     # UI -> http://localhost:8501, API -> http://localhost:8000
+```
+
+## 10. Deploy to Google Cloud Run
+Three Cloud Run services (UI → private API → LiteLLM gateway), secrets in Secret Manager,
+least-privilege service accounts, and CI/CD via Cloud Build on every push to `main`.
+Step-by-step guide: **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**.
+
 ## Troubleshooting
 | Symptom | Fix |
 |---|---|

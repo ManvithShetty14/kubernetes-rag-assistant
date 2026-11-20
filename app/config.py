@@ -14,6 +14,15 @@ class Settings:
     QDRANT_API_KEY=os.getenv("QDRANT_API_KEY")
     QDRANT_COLLECTION = "enterprise_rag"
 
+    # Reranker relevance cut-off (0..1). Chunks scoring below this are treated as irrelevant;
+    # if none pass, the bot replies "not found in the docs" instead of answering from general knowledge.
+    # Raise it to be stricter, lower it if real Kubernetes questions get "not found".
+    MIN_RERANK_SCORE = float(os.getenv("MIN_RERANK_SCORE") or 0.01)
+
+    # NeMo guardrails (embeddings-only): how closely a message must match a rail's examples (0..1)
+    # to trigger it. Lower = catches more paraphrases but risks false blocks; higher = stricter.
+    GUARDRAILS_SIMILARITY_THRESHOLD = float(os.getenv("GUARDRAILS_SIMILARITY_THRESHOLD") or 0.75)
+
     #REASONING ENGINE (GROQ)
     GROQ_API_KEY = os.getenv("GROQ_API_KEY")
     GROQ_MODEL = "openai/gpt-oss-120b"  # informational; actual routing is in litellm_config.yaml
@@ -27,6 +36,12 @@ class Settings:
     GUARD_MODEL = os.getenv("GUARD_MODEL") or "guard-model"  # groq/openai/gpt-oss-20b
     LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT") or 60)
     ENVIRONMENT = os.getenv("ENVIRONMENT") or "development"
+
+    # --- CONVERSATION PERSISTENCE ---
+    # Postgres connection string. Empty = in-memory (conversations lost when the API restarts).
+    DATABASE_URL = os.getenv("DATABASE_URL") or ""
+    # How many previous messages are sent to the LLM as context (keeps long chats within token limits)
+    MAX_HISTORY_MESSAGES = int(os.getenv("MAX_HISTORY_MESSAGES") or 10)
 
     # --- OBSERVABILITY ---
     LANGSMITH_API_KEY = os.getenv("LANGSMITH_API_KEY") or ""

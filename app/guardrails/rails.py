@@ -3,7 +3,7 @@ from nemoguardrails import RailsConfig, LLMRails
 
 from app.config import settings
 from app.gateway import get_langchain_llm
-from app.guardrails.colang_rules import COLANG_CONTENT, YAML_CONTENT, RAIL_INDICATORS
+from app.guardrails.colang_rules import COLANG_CONTENT, RAIL_INDICATORS, RAIL_PASS_MESSAGE, build_yaml
 
 _rails: LLMRails | None = None
 
@@ -11,8 +11,8 @@ _rails: LLMRails | None = None
 def initialize_rails() -> None:
     """
     Build the NeMo LLMRails singleton at app startup.
-    Uses a small, fast model (gpt-oss-20b via the "guard-model" alias) for intent
-    classification at the gate — the heavier gpt-oss-120b is reserved for the RAG pipeline.
+    Intent matching is embeddings-only (local model, no LLM calls). The guard LLM is still
+    passed in because NeMo requires one, but the configured flows never need to call it.
     """
     global _rails
 
@@ -21,11 +21,14 @@ def initialize_rails() -> None:
 
     config = RailsConfig.from_content(
         colang_content=COLANG_CONTENT,
-        yaml_content=YAML_CONTENT
+        yaml_content=build_yaml(settings.GUARDRAILS_SIMILARITY_THRESHOLD)
     )
 
     _rails = LLMRails(config, llm=guard_llm)
-    logfire.info(f"🛡️ NeMo Guardrails initialised (gateway model: {settings.GUARD_MODEL}).")
+    logfire.info(
+        f"🛡️ NeMo Guardrails initialised (embeddings-only, "
+        f"threshold={settings.GUARDRAILS_SIMILARITY_THRESHOLD})."
+    )
 
 
 def guard(message: str) -> tuple[bool, str | None]:
@@ -47,11 +50,19 @@ def guard(message: str) -> tuple[bool, str | None]:
         # NeMo returns {'role': 'assistant', 'content': '...'} — extract text
         content = result.get("content", "") if isinstance(result, dict) else str(result)
 
-        fired = any(indicator in content for indicator in RAIL_INDICATORS)
+        if content.strip() == RAIL_PASS_MESSAGE:
+            logfire.info("✅ Guardrails passed (no rail matched).")
+            return False, None
 
-        if fired:
+        if any(indicator in content for indicator in RAIL_INDICATORS):
             logfire.info(f"🛡️ Guardrails fired | query='{message[:80]}'")
             return True, content
 
-        logfire.info("✅ Guardrails passed.")
+        # Neither a known rail reply nor the pass-through sentinel: NeMo took an unexpected path
+        # (e.g. generated its own text). Don't silently call that "passed" — log it loudly.
+        # We still continue, because the planner applies the scope/safety checks next.
+        logfire.warning(
+            f"⚠️ Guardrails returned unexpected output — continuing to planner checks. "
+            f"output='{content[:120]}'"
+        )
         return False, None
