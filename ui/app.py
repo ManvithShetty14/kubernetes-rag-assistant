@@ -1,3 +1,4 @@
+import hashlib
 import os
 import re
 import time
@@ -64,6 +65,48 @@ def _new_id() -> str:
     return uuid.uuid4().hex
 
 
+# --- IDENTITY: guest link or Google account ---
+ACCOUNT_PREFIX = "g_"   # must match app/persistence.py
+
+
+def _valid_guest_id(value) -> bool:
+    # Guest IDs come from the URL, so refuse the account prefix: otherwise someone could put a
+    # signed-in user's owner ID into ?u= and read their chats as a "guest".
+    return _valid_id(value) and not value.startswith(ACCOUNT_PREFIX)
+
+
+def account_owner_id(subject: str) -> str:
+    """Stable, non-reversible owner ID for a Google account (the OIDC 'sub' claim)."""
+    return ACCOUNT_PREFIX + hashlib.sha256(f"google:{subject}".encode()).hexdigest()[:40]
+
+
+def resolve_owner(logged_in: bool, subject, url_owner, session_guest) -> str:
+    """Whose chats to show: the account when signed in, else this tab's guest ID / the URL's / a new one."""
+    if logged_in and subject:
+        return account_owner_id(subject)
+    if session_guest and _valid_guest_id(session_guest):
+        return session_guest
+    if _valid_guest_id(url_owner):
+        return url_owner
+    return _new_id()
+
+
+def _user_claim(key: str):
+    """Read a claim (sub, email, name) from st.user, whichever access style this Streamlit version supports."""
+    try:
+        return st.user.get(key)
+    except Exception:
+        return getattr(st.user, key, None)
+
+
+def _auth_enabled() -> bool:
+    """Google sign-in is offered only when .streamlit/secrets.toml has an [auth] section."""
+    try:
+        return bool(st.secrets.get("auth", {}).get("client_id"))
+    except Exception:
+        return False
+
+
 # --- PAGE CONFIG ---
 st.set_page_config(
     page_title="Enterprise Agentic RAG",
@@ -108,12 +151,25 @@ def new_chat() -> None:
 
 
 # --- SESSION MANAGEMENT ---
-# Both IDs live in the page URL (?u=<owner>&chat=<chat>), so refreshing the page or opening a
-# bookmarked link restores your chat list and the open conversation. Streamlit cannot set
-# cookies natively, so the URL is the most reliable place to keep them.
-if "owner_id" not in st.session_state:
-    url_owner = st.query_params.get("u")
-    st.session_state.owner_id = url_owner if _valid_id(url_owner) else _new_id()
+# Guests: both IDs live in the page URL (?u=<owner>&chat=<chat>), so refreshing or opening a
+# bookmarked link restores the chat list. Signed-in users: chats belong to their Google account
+# (works on any device), and only ?chat= is kept in the URL.
+AUTH_ENABLED = _auth_enabled()
+LOGGED_IN = AUTH_ENABLED and bool(getattr(st.user, "is_logged_in", False))
+SUBJECT = (_user_claim("sub") or _user_claim("email")) if LOGGED_IN else None
+
+url_owner = st.query_params.get("u")
+owner = resolve_owner(LOGGED_IN, SUBJECT, url_owner, st.session_state.get("guest_owner"))
+if not LOGGED_IN:
+    st.session_state.guest_owner = owner
+elif _valid_guest_id(url_owner):
+    # A signed-in user opened a guest link: offer to move its chats into the account
+    st.session_state.import_from = url_owner
+
+if st.session_state.get("owner_id") != owner:
+    # First run, or the identity changed (signed in / out): start from that owner's chats
+    st.session_state.owner_id = owner
+    st.session_state.pop("session_id", None)
 
 if "session_id" not in st.session_state:
     url_chat = st.query_params.get("chat")
@@ -122,8 +178,45 @@ if "session_id" not in st.session_state:
     else:
         new_chat()
 
-st.query_params["u"] = st.session_state.owner_id
+if LOGGED_IN:
+    if "u" in st.query_params:
+        del st.query_params["u"]
+else:
+    st.query_params["u"] = st.session_state.owner_id
 st.query_params["chat"] = st.session_state.session_id
+
+
+def render_account() -> None:
+    """Sign-in / sign-out controls and the 'move guest chats' offer (only if sign-in is configured)."""
+    if not AUTH_ENABLED:
+        return
+    if not LOGGED_IN:
+        st.button("🔐 Sign in with Google", width="stretch", on_click=st.login)
+        st.caption("Optional — sign in to keep your chats on any device. Or just start chatting as a guest.")
+        return
+
+    st.caption(f"Signed in as **{_user_claim('name') or _user_claim('email') or 'Google user'}**")
+    st.button("Sign out", width="stretch", on_click=st.logout)
+
+    guest = st.session_state.get("import_from")
+    if guest:
+        try:
+            guest_chats = api("GET", "/chats", params={"owner_id": guest}).get("chats", [])
+        except Exception:
+            guest_chats = []
+        if not guest_chats:
+            st.session_state.pop("import_from", None)
+        else:
+            st.info(f"This guest link has {len(guest_chats)} chat(s).")
+            if st.button("📥 Move them to my account", width="stretch"):
+                try:
+                    moved = api("POST", "/chats/claim",
+                                json={"from_owner_id": guest, "to_owner_id": st.session_state.owner_id})
+                    st.session_state.pop("import_from", None)
+                    st.toast(f"Moved {moved.get('moved', 0)} chat(s) to your account.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Couldn't move the chats ({e}).")
 
 
 def render_sidebar() -> None:
@@ -131,6 +224,7 @@ def render_sidebar() -> None:
     # appears in the list.
     with st.sidebar:
         st.title("🧠 Agent OS")
+        render_account()
 
         if st.button("➕ New chat", width="stretch", type="primary"):
             new_chat()
@@ -163,8 +257,9 @@ def render_sidebar() -> None:
             new_chat()
             st.rerun()
 
-        st.caption("🔖 **Bookmark this page** to come back to your chats later — "
-                   "your chat list is tied to this link.")
+        if not LOGGED_IN:
+            st.caption("🔖 **Bookmark this page** to come back to your chats later — "
+                       "as a guest, your chat list is tied to this link.")
         st.success(f"Logfire: {LOGFIRE_STATUS}")
         st.info(f"Chat ID: {st.session_state.session_id[:8]}")
 

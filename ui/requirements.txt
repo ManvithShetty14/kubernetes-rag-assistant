@@ -1,5 +1,5 @@
 # Minimal, pinned dependencies for the Streamlit UI container (versions match uv.lock)
-streamlit==1.66.1
+streamlit[auth]==1.66.1   # [auth] = built-in Google sign-in (st.login)
 requests==2.34.2
 python-dotenv==1.2.4
 logfire==5.4.0

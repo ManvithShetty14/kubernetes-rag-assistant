@@ -101,6 +101,14 @@ steps:
           --role="roles/run.invoker" --quiet > /dev/null
 
         echo "=== 3/3 Streamlit UI (public)"
+        # Optional Google sign-in: if the 'streamlit-auth' secret exists, mount it as secrets.toml
+        UI_AUTH_FLAGS=()
+        if gcloud secrets describe streamlit-auth --format='value(name)' > /dev/null 2>&1; then
+          UI_AUTH_FLAGS=(--set-secrets="/app/.streamlit/secrets.toml=streamlit-auth:latest")
+          echo "Google sign-in: enabled"
+        else
+          echo "Google sign-in: not configured (guest mode only)"
+        fi
         gcloud run deploy "${_UI}" \
           --image="$${IMG}/ui:$BUILD_ID" \
           --region="${_REGION}" \
@@ -110,6 +118,7 @@ steps:
           --allow-unauthenticated \
           --service-account="rag-ui-sa@$${SA_SUFFIX}" \
           --set-env-vars="BACKEND_URL=$${API_URL},BACKEND_AUTH=google" \
+          "$${UI_AUTH_FLAGS[@]}" \
           --quiet
 
         echo ""

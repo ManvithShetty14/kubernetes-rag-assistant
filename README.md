@@ -70,6 +70,9 @@ uv run streamlit run evals/app.py
 Conversations are saved in Postgres (LangGraph `PostgresSaver`) when `DATABASE_URL` is set, and
 listed in the UI sidebar ("Your chats"). Chats are tied to the page link (`?u=<owner>&chat=<chat>`),
 so bookmark it to return later. Without `DATABASE_URL`, memory is in-process (lost on restart).
+Optional **Sign in with Google** (Streamlit's built-in OIDC login) ties chats to the user's account
+instead, so they follow the user across devices — guests can still chat without signing in.
+Setup: [docs/DEPLOYMENT.md, section 6](docs/DEPLOYMENT.md).
 Local database: `docker compose up -d postgres` and
 `DATABASE_URL=postgresql://rag:rag@localhost:5432/rag` in `.env`.
 

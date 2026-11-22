@@ -13,7 +13,7 @@ from app.config import settings
 from app.gateway import check_gateway_health
 from app.guardrails import initialize_rails, guard
 from app import persistence
-from app.persistence import ChatOwnershipError, chat_index, make_title, valid_id
+from app.persistence import ChatOwnershipError, chat_index, is_account_owner, make_title, valid_id
 
 from pydantic import BaseModel
 from typing import Optional
@@ -43,6 +43,11 @@ class QueryRequest(BaseModel):
     # Opaque ID of whoever owns this chat (the UI keeps it in the page URL). Chats can only be
     # listed / read / continued by the same owner.
     owner_id: Optional[str] = "anonymous"
+
+
+class ClaimRequest(BaseModel):
+    from_owner_id: str   # guest owner ID (from a guest link)
+    to_owner_id: str     # the signed-in user's account owner ID
 
 
 def _require_ids(thread_id: str, owner_id: str) -> None:
@@ -214,4 +219,22 @@ def delete_chat(thread_id: str, owner_id: str = Query(...)):
     except Exception as e:
         logfire.warning(f"⚠️ Could not delete checkpoints for {thread_id}: {e}")
     return {"deleted": thread_id}
+
+
+@app.post("/chats/claim")
+def claim_chats(request: ClaimRequest):
+    """
+    Move all chats from a guest link into a signed-in account (used right after signing in).
+    Only guest-owned chats can be moved, and only into an account — so an account's chats can
+    never be pulled out by someone who learns its owner ID. Holding a guest link already gives
+    full access to its chats, so moving them grants nothing extra.
+    """
+    src, dst = request.from_owner_id, request.to_owner_id
+    if not (valid_id(src) and valid_id(dst)) or src == dst:
+        raise HTTPException(status_code=400, detail="Invalid owner ids.")
+    if is_account_owner(src) or not is_account_owner(dst):
+        raise HTTPException(status_code=400, detail="Chats can only be moved from a guest link into an account.")
+    moved = chat_index().transfer(src, dst)
+    logfire.info(f"📥 Moved {moved} guest chat(s) into an account.")
+    return {"moved": moved}
 

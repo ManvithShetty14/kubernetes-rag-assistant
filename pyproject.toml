@@ -52,7 +52,7 @@ evals = [
 ]
 # Streamlit UI (the UI container installs its own small pinned list: ui/requirements.txt)
 ui = [
-    "streamlit>=1.66.1",
+    "streamlit[auth]>=1.66.1",   # [auth] = built-in OIDC login (st.login)
 ]
 
 [tool.uv]

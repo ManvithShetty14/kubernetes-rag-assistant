@@ -26,6 +26,15 @@ def valid_id(value) -> bool:
     return isinstance(value, str) and bool(_ID_RE.match(value))
 
 
+# Owner IDs of signed-in users start with this prefix (derived from their Google account by the UI).
+# Guest owner IDs never do, so a guest link can't be used to impersonate an account.
+ACCOUNT_PREFIX = "g_"
+
+
+def is_account_owner(owner_id: str) -> bool:
+    return owner_id.startswith(ACCOUNT_PREFIX)
+
+
 class ChatOwnershipError(Exception):
     """The chat exists but belongs to a different owner."""
 
@@ -127,6 +136,13 @@ class _MemoryChatIndex:
                 return True
         return False
 
+    def transfer(self, from_owner: str, to_owner: str) -> int:
+        with self._lock:
+            moved = [r for r in self._rows.values() if r["owner_id"] == from_owner]
+            for r in moved:
+                r["owner_id"] = to_owner
+        return len(moved)
+
 
 class _PostgresChatIndex:
     def __init__(self):
@@ -183,6 +199,14 @@ class _PostgresChatIndex:
                 (thread_id, owner_id),
             ).fetchone()
         return row is not None
+
+    def transfer(self, from_owner: str, to_owner: str) -> int:
+        with _get_pool().connection() as conn:
+            rows = conn.execute(
+                "UPDATE chat_threads SET owner_id = %s WHERE owner_id = %s RETURNING thread_id",
+                (to_owner, from_owner),
+            ).fetchall()
+        return len(rows)
 
 
 _chat_index = None

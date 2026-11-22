@@ -17,7 +17,7 @@ Browser ──► rag-ui (Streamlit, public)
 |---|---|---|---|
 | `rag-gateway` | `docker/gateway.Dockerfile` | 1 GiB | Public URL, every call needs the LiteLLM master key |
 | `rag-api` | `docker/api.Dockerfile` | 2 GiB | **Private** — only the UI's service account can invoke it |
-| `rag-ui` | `docker/ui.Dockerfile` | 512 MiB | Public (this is your demo link) |
+| `rag-ui` | `docker/ui.Dockerfile` | 512 MiB | Public (this is your demo link); optional Google sign-in |
 
 All services scale to zero (`min-instances=0`) and are capped at one instance (`max-instances=1`),
 which keeps the demo inside the free tier and caps the damage if someone abuses the link.
@@ -198,6 +198,71 @@ Chats are tied to the page link (`?u=...`): bookmark it to find your chats again
 **First request after idle is slow (cold start):** all three services scale to zero, so the first
 visitor waits roughly 20–60 s while the gateway and API start. Later requests are fast. Before a demo
 or interview, open the link once to warm it up.
+
+---
+
+## 6. Optional: "Sign in with Google" (guest mode stays)
+
+Visitors can still chat immediately as guests. Signing in ties their chats to their Google account,
+so they appear on any device; a signed-in user who opens an old guest link is offered a button to
+move those chats into the account. It uses Streamlit's built-in OIDC login (`st.login`) — Google
+handles passwords and 2FA; the app never sees them.
+
+### 6a. Create the Google OAuth client (browser, ~10 min)
+1. Console → search **"Google Auth Platform"** (a.k.a. *OAuth consent screen*) → **Get started**:
+   app name `Kubernetes RAG Assistant`, your support email, audience **External**, contact email → Create.
+2. **Audience → Publish app**. While the app is in *Testing*, only listed test users can sign in.
+   The app only asks for basic profile/email scopes, which don't require Google verification.
+3. **Clients → Create client** → type **Web application** → under **Authorized redirect URIs** add both:
+   - `http://localhost:8501/oauth2callback` (local)
+   - `<your rag-ui URL>/oauth2callback` (find it with
+     `gcloud run services describe rag-ui --region=$REGION --format='value(status.url)'`)
+4. Copy the **Client ID** and **Client secret**.
+
+### 6b. Try it locally
+Create `.streamlit/secrets.toml` in the project root (already git-ignored — never commit it):
+```toml
+[auth]
+redirect_uri = "http://localhost:8501/oauth2callback"
+cookie_secret = "paste the output of: openssl rand -hex 32"
+client_id = "xxxx.apps.googleusercontent.com"
+client_secret = "xxxx"
+server_metadata_url = "https://accounts.google.com/.well-known/openid-configuration"
+```
+Restart the UI (`uv run streamlit run ui/app.py`). The sidebar now shows **Sign in with Google**.
+Without this file the app runs exactly as before (guest mode only).
+
+### 6c. Enable it on Cloud Run (Cloud Shell)
+```bash
+export PROJECT_ID="$(gcloud config get-value project)"; export REGION="us-central1"
+UI_URL=$(gcloud run services describe rag-ui --region=$REGION --format='value(status.url)')
+read -rp  "Google client ID: " CID
+read -rsp "Google client secret: " CSECRET; echo
+
+cat > /tmp/streamlit-auth.toml <<EOF
+[auth]
+redirect_uri = "$UI_URL/oauth2callback"
+cookie_secret = "$(openssl rand -hex 32)"
+client_id = "$CID"
+client_secret = "$CSECRET"
+server_metadata_url = "https://accounts.google.com/.well-known/openid-configuration"
+EOF
+gcloud secrets create streamlit-auth --data-file=/tmp/streamlit-auth.toml && rm /tmp/streamlit-auth.toml
+
+# The UI may read it; the pipeline may check that it exists (metadata only, not the value)
+gcloud secrets add-iam-policy-binding streamlit-auth \
+  --member="serviceAccount:rag-ui-sa@$PROJECT_ID.iam.gserviceaccount.com" --role=roles/secretmanager.secretAccessor
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:rag-deployer@$PROJECT_ID.iam.gserviceaccount.com" \
+  --role=roles/secretmanager.viewer --condition=None
+```
+Redeploy (push a commit, or **Run** the trigger). The build log shows `Google sign-in: enabled`, and
+Cloud Run mounts the secret as `/app/.streamlit/secrets.toml` in the UI container.
+
+**How identity flows:** the UI derives the owner ID from the user's Google account
+(`g_` + SHA-256 of the OIDC `sub` claim) and sends it to the private API, which only the UI's service
+account can call. Guest links can never use the `g_` prefix, so a guest link can't impersonate an
+account, and chats can only be moved *from* a guest link *into* an account.
 
 ---
 

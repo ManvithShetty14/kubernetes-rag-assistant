@@ -73,6 +73,9 @@ services:
     env_file: .env
     environment:
       BACKEND_URL: http://api:8080
+    volumes:
+      # Optional Google sign-in: put secrets.toml here (see docs/DEPLOYMENT.md, section 6)
+      - ./.streamlit:/app/.streamlit:ro
     depends_on:
       - api
     profiles: ["full"]
