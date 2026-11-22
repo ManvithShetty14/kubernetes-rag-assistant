@@ -1,0 +1,10 @@
+# Files NOT uploaded by `gcloud builds submit` (keeps uploads small and secrets local).
+# Everything in .gitignore (.env, .venv, caches, ...) is excluded too:
+#!include:.gitignore
+
+.git
+.github
+DATA/
+processed_data/
+evals/
+docs/
